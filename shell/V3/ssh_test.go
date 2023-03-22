@@ -12,7 +12,7 @@ func TestSsh(t *testing.T) {
 	//fmt.Println([]byte(gbk))
 
 	server, port, user, pwd := "192.168.35.130", "22", "root", "Qaz@1234"
-	s := NewMySsh(server, port, user, pwd)
+	s := NewMySsh(server, port, user, pwd, "")
 	s.UseSSH = true
 	//s.InitClient()
 	//s.InitCommonSession()

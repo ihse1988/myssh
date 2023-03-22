@@ -16,7 +16,7 @@ func main() {
 
 	my := myssh.NewMySsh(host, port, userName, password, password)
 	my.InitCommonTerminal()
-	output, err := my.SendCmdWithOut("cd /root")
+	output, err := my.SendCmdWithOut("ls")
 	fmt.Println(output)
 	if err != nil {
 		panic(err)

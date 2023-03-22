@@ -2,7 +2,6 @@ package myssh
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"golang.org/x/crypto/ssh"
 	"io"
@@ -34,6 +33,8 @@ type MySsh struct {
 	count     int
 	lastcount int
 	RootPwd   string
+
+	lastByteList []byte
 }
 
 type SshBuffer struct {
@@ -339,6 +340,9 @@ func (c *MySsh) handleASCIISequences() {
 
 // 使用上一个session继续执行命令
 func (c *MySsh) listenMessages(terminator int32) error {
+	//go resetOutBuf(c.SshBuffer.outBuf, make(chan struct{}), '#')
+	c.SshBuffer.outBuf.Reset()    //尝试重置下在读取？
+	c.byteslist = make([]byte, 0) //重置
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -357,8 +361,6 @@ func (c *MySsh) listenMessages(terminator int32) error {
 		//buf := make([]byte, 8192)
 		c.byteslist = make([]byte, 0)
 		var t int
-		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-		defer cancel()
 		//这里还需要一个定时器
 		//ESC_pattern := "[ -/]*([0-Z\\-~]|\\[[ -/]*[0-?]*[@-~])"  //和java不一样，java严格匹配
 		//判断
@@ -366,88 +368,89 @@ func (c *MySsh) listenMessages(terminator int32) error {
 			time.Sleep(time.Millisecond * 200)
 			//n, err := c.SshBuffer.outBuf.Read(buf)
 			//重写读的方法排除乱码
-			select {
-			case <-ctx.Done():
-				c.SshTerminal.out <- string(c.byteslist)
-				wg1.Done()
-				//超时退出，这里无论如何都返回并且
-				return
-			default:
-				for {
-					b, err := c.getChar()
-					if err != nil {
-						break
-					}
-					//fmt.Println(b)  //保留debug
-					if b == 0 {
-						continue
-					}
-					// ESC
-					if b == 0x1b {
-						c.handleESCSequences()
-						continue
-					}
-					if b == 0x07 { // bel ^G
-						continue
-					}
-					if b == 0x08 {
-						continue
-					}
-					if b == 0x09 { // ht(^I)
-						continue
-					}
-
-					if b == 0x0f { // rmacs ^O // end alternate character set (P)
-						continue
-					}
-
-					if b == 0x0e { // smacs ^N // start alternate character set
-						// (P)
-						continue
-					} else {
-						c.pushChar()
-						c.handleASCIISequences()
-						continue
-					}
+			for {
+				b, err := c.getChar()
+				if err != nil {
+					break
+				}
+				//fmt.Println(b)  //保留debug
+				if b == 0 {
+					continue
+				}
+				// ESC
+				if b == 0x1b {
+					c.handleESCSequences()
+					continue
+				}
+				if b == 0x07 { // bel ^G
+					continue
+				}
+				if b == 0x08 {
+					continue
+				}
+				if b == 0x09 { // ht(^I)
+					continue
 				}
 
-				//if err != nil && err != io.EOF {
-				//	fmt.Printf("read out buffer err:%v", err)
-				//	break
-				//}
-				//fmt.Println(n, terminator, t)
-				//compile, err := regexp.Compile("(\\x1b\\[|\\x9b)[^@-_]*[@-_]|\\x1b[@-_]")
-				//all := compile.ReplaceAll(buf, []byte(""))
-				//c.SshTerminal.out <- string(all)
-				//break
-				if len(c.byteslist) > 0 {
-					t = bytes.LastIndexByte(c.byteslist, byte(terminator))
-					if t > 0 {
-						//fmt.Println("t>0", c.byteslist[:t])
-						//fmt.Println("转string", string(c.byteslist))
-						//设计为永远获取最后一条
-						//取倒数第二个#号到用户之间的数据
-						t1 := bytes.LastIndexByte(c.byteslist[0:t], byte(terminator))
-						t2 := strings.LastIndex(string(c.byteslist[0:t]), "["+c.User) //- len(c.User) - 1
-						//fmt.Println("测试：", string(c.byteslist))
-						if t2 > t1 && t1 > 0 {
+				if b == 0x0f { // rmacs ^O // end alternate character set (P)
+					continue
+				}
 
-							c.SshTerminal.out <- string(c.byteslist[t1+1 : t2])
-						} else {
-							c.SshTerminal.out <- string(c.byteslist[t:])
-						}
-						break
-					}
+				if b == 0x0e { // smacs ^N // start alternate character set
+					// (P)
+					continue
 				} else {
-					//fmt.Println(c.byteslist)
+					c.pushChar()
+					c.handleASCIISequences()
+					continue
+				}
+			}
+
+			//if err != nil && err != io.EOF {
+			//	fmt.Printf("read out buffer err:%v", err)
+			//	break
+			//}
+			//fmt.Println(n, terminator, t)
+			//compile, err := regexp.Compile("(\\x1b\\[|\\x9b)[^@-_]*[@-_]|\\x1b[@-_]")
+			//all := compile.ReplaceAll(buf, []byte(""))
+			//c.SshTerminal.out <- string(all)
+			//break
+
+			if len(c.byteslist) > 0 && len(c.byteslist) > c.lastcount {
+				fmt.Printf("lastcout=%d,len=%d\r\n", c.lastcount, len(c.byteslist))
+				t = bytes.LastIndexByte(c.byteslist, byte(terminator))
+				if t > 0 {
+					//fmt.Println("t>0", c.byteslist[:t])
 					//fmt.Println("转string", string(c.byteslist))
-					c.SshTerminal.out <- string(c.byteslist)
+					//设计为永远获取最后一条
+					//取倒数第二个#号到用户之间的数据
+					//t1 := bytes.LastIndexByte(c.byteslist[0:t], byte(terminator))
+					//t2 := strings.LastIndex(string(c.byteslist[0:t]), "["+c.User) //- len(c.User) - 1
+					////fmt.Println("测试：", string(c.byteslist))
+					//if t2 > t1 && t1 > 0 {
+					//	fmt.Printf("t1=%d,t2=%d", t1, t2)
+					//	c.SshTerminal.out <- string(c.byteslist[t1+1 : t2])
+					//} else {
+					//	fmt.Printf("不满足条件")
+					//	c.SshTerminal.out <- string(c.byteslist[t:])
+					//}
+
+					c.SshTerminal.out <- string(c.byteslist[c.lastcount:])
+					//新方案
+					c.lastcount = len(c.byteslist)
 					break
 				}
 			}
-			//fmt.Println(fmt.Sprintf("读取个数%d", c.count))
-			wg1.Done()
+			//else {
+			//	c.lastcount = len(c.byteslist)
+			//	//fmt.Println(c.byteslist)
+			//	fmt.Println("转string", string(c.byteslist))
+			//	c.SshTerminal.out <- string(c.byteslist)
+			//	break
+			//}
 		}
+		//fmt.Println(fmt.Sprintf("读取个数%d", c.count))
+		wg1.Done()
 
 	}()
 	wg1.Wait()
@@ -489,6 +492,7 @@ func (c *MySsh) SendCmdWithOut(cmd string) (string, error) {
 	err := c.listenMessages(terminator)
 	out := <-c.SshTerminal.out
 	//fmt.Println(out)
+	//下面这个方法有bug，如果返回的文件包含用户则会出现错误
 	return strings.TrimSpace(strings.Split(out, "["+c.User)[0]), err
 }
 
