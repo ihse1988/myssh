@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"fmt"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -10,6 +9,7 @@ import (
 	"github.com/google/gopacket/pcapgo"
 	"github.com/google/gopacket/tcpassembly"
 	"github.com/google/gopacket/tcpassembly/tcpreader"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -33,50 +33,65 @@ var (
 	tcpLayer layers.TCP
 )
 
+type httpStream struct {
+	net, transport gopacket.Flow
+	r              tcpreader.ReaderStream
+}
+
 type httpStreamFactory struct{}
 
-func (factory *httpStreamFactory) New(netFlow, tcpFlow gopacket.Flow) tcpassembly.Stream {
-	stream := &httpStream{
-		netFlow: netFlow,
-		tcpFlow: tcpFlow,
-		r:       tcpreader.NewReaderStream(),
+func (h *httpStreamFactory) New(net, transport gopacket.Flow) tcpassembly.Stream {
+	hstream := &httpStream{
+		net:       net,
+		transport: transport,
+		r:         tcpreader.NewReaderStream(),
 	}
-	go stream.run()
-	return stream
+	go hstream.run() // Important... we must guarantee that data from the reader stream is read.
+
+	// ReaderStream implements tcpassembly.Stream, so we can return a pointer to it.
+	return &hstream.r
 }
 
-type httpStream struct {
-	netFlow, tcpFlow gopacket.Flow
-	r                tcpreader.ReaderStream
-}
-
-func (stream *httpStream) Reassembled(reassemblies []tcpassembly.Reassembly) {
-	//TODO implement me
-	panic("implement me")
-}
-
-func (stream *httpStream) ReassemblyComplete() {
-	//TODO implement me
-	panic("implement me")
-}
-
-func (stream *httpStream) run() {
+func (h *httpStream) run() {
+	buf := bufio.NewReader(&h.r)
 	for {
-		if err := stream.r.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
-			fmt.Println("Failed to set read deadline:", err)
+		req, err := http.ReadRequest(buf)
+		if err == io.EOF {
+			// We must read until we see an EOF... very important!
 			return
+		} else if err != nil {
+			log.Println("Error reading stream", h.net, h.transport, ":", err)
+		} else {
+			bodyBytes := tcpreader.DiscardBytesToEOF(req.Body)
+			req.Body.Close()
+			log.Println("Received request from stream", h.net, h.transport, ":", req, "with", bodyBytes, "bytes in request body")
 		}
-		data, err := stream.r.ReadBytes('\n')
-		if err != nil {
-			fmt.Println("Failed to read bytes:", err)
-			return
-		}
-		if len(data) == 0 {
-			return
-		}
-		fmt.Printf("[%s] %s", stream.netFlow, string(data))
 	}
 }
+
+//func (stream *httpStream) run() {
+//	streamBuf := bufio.NewReader(&stream.r)
+//	timeout := 30 * time.Second
+//	ticker := time.NewTicker(timeout)
+//	defer ticker.Stop()
+//	for {
+//		select {
+//		case <-ticker.C:
+//			fmt.Println("Timeout")
+//			return
+//		default:
+//			data, err := streamBuf.ReadByte()
+//			if err != nil {
+//				fmt.Println("Failed to read bytes:", err)
+//				return
+//			}
+//			//if len(data) == 0 {
+//			//	return
+//			//}
+//			fmt.Printf("[%s] %s", stream.netFlow, string(data))
+//		}
+//	}
+//}
 
 func main() {
 	FindAllDevs()
@@ -110,43 +125,46 @@ func main() {
 	}
 	fmt.Println("Only capturing TCP port 80 packets.")
 
+	streamFactory := &httpStreamFactory{}
+	streamPool := tcpassembly.NewStreamPool(streamFactory)
+	assembler := tcpassembly.NewAssembler(streamPool)
 	// Use the handle as a packet source to process all packets
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
 	for packet := range packetSource.Packets() {
-		//if packet.TransportLayer() == nil || packet.TransportLayer().LayerType() != layers.LayerTypeTCP {
-		//	continue
-		//}
-		//tcp := packet.TransportLayer().(*layers.TCP)
-		//assembler.AssembleWithTimestamp(
-		//	packet.NetworkLayer().NetworkFlow(),
-		//	tcp,
-		//	packet.Metadata().Timestamp)
+		if packet.TransportLayer() == nil || packet.TransportLayer().LayerType() != layers.LayerTypeTCP {
+			continue
+		}
+		tcp := packet.TransportLayer().(*layers.TCP)
+		assembler.AssembleWithTimestamp(
+			packet.NetworkLayer().NetworkFlow(),
+			tcp,
+			packet.Metadata().Timestamp)
 		//上面代码是解决tcp重传的问题，暂时没有写完整
 
 		// Process packet here
 		//fmt.Println(packet)
 		//w.WritePacket(packet.Metadata().CaptureInfo, packet.Data())
 		packetCount++
-		if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
-			tcp, _ := tcpLayer.(*layers.TCP)
-			if len(tcp.Payload) != 0 {
-				//payloadStr, err := decodeUTF8(tcp.Payload)
-				//if err != nil {
-				//	// 处理解码错误
-				//}
-				reader := bufio.NewReader(bytes.NewReader(tcp.Payload))
-				//reader := bufio.NewReader(strings.NewReader(payloadStr + "\r\n"))
-				httpReq, err := http.ReadRequest(reader)
-				if err != nil {
-					fmt.Println(err)
-				}
-				fmt.Println(httpReq)
-			}
-		}
+		//if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
+		//	tcp, _ := tcpLayer.(*layers.TCP)
+		//	if len(tcp.Payload) != 0 {
+		//		//payloadStr, err := decodeUTF8(tcp.Payload)
+		//		//if err != nil {
+		//		//	// 处理解码错误
+		//		//}
+		//		reader := bufio.NewReader(bytes.NewReader(tcp.Payload))
+		//		//reader := bufio.NewReader(strings.NewReader(payloadStr + "\r\n"))
+		//		httpReq, err := http.ReadRequest(reader)
+		//		if err != nil {
+		//			fmt.Println(err)
+		//		}
+		//		fmt.Println(httpReq)
+		//	}
+		//}
 		//printPacketInfo(packet)
 		//newDecode(packet)
 		// Only capture 100 and then stop
-		printHTTPPacketInfo(packet)
+		//printHTTPPacketInfo(packet)
 		if packetCount > 100 {
 			break
 		}

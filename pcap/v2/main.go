@@ -28,7 +28,7 @@ import (
 
 var iface = flag.String("i", "\\Device\\NPF_{29B2AD5D-FAC0-478A-9985-AADEBE99D52E}", "Interface to get packets from")
 var fname = flag.String("r", "", "Filename to read from, overrides -i")
-var snaplen = flag.Int("s", 5, "SnapLen for pcap packet capture")
+var snaplen = flag.Int("s", 1600, "SnapLen for pcap packet capture")
 var filter = flag.String("f", "tcp[((tcp[12:1] & 0xf0) >> 2):4] = 0x47455420 or tcp[((tcp[12:1] & 0xf0) >> 2):4] = 0x504f5354", "BPF filter for pcap")
 var logAllPackets = flag.Bool("v", false, "Logs every packet in great detail")
 
